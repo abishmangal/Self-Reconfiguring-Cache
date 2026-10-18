@@ -1,5 +1,5 @@
 """
-config.py — Single source of truth for all simulator constants.
+sim_config.py — Single source of truth for all simulator constants.
 
 Every tunable lives here. Nothing else in the codebase should hardcode
 a number that could reasonably change between experiments.
@@ -14,6 +14,8 @@ Sections:
   7. Controller (thresholds, gates, horizon)
   8. Reconfiguration overhead estimates
   9. Experiment settings
+ 10. Workload
+ 11. Validation (runs at import)
 """
 
 # ---------------------------------------------------------------------------
@@ -49,19 +51,22 @@ DRAM_BUS_CYCLES = 8                # cycles the bus is occupied per line transfe
 # ---------------------------------------------------------------------------
 
 CORE_WIDTH = 4                     # max instructions issued per cycle
-ROB_SIZE = 128                     # reorder buffer entries; stall if oldest miss
-                                   # is older than this many instructions
-LOAD_HIT_LATENCY = L1_LATENCY      # cycles to serve an L1 hit
-DEPENDENT_LOAD_PENALTY = 0         # extra stall for a dependent load (0 = none,
-                                   # the dependency itself already stalls it)
+ROB_SIZE = 128                     # reorder buffer entries; the core stalls when
+                                   # the oldest outstanding load is this many
+                                   # instructions old
 
 # ---------------------------------------------------------------------------
 # 4. MSHR ladder
 # ---------------------------------------------------------------------------
 
-MSHR_CHOICES = (4, 8, 16, 32)
-MSHR_DEFAULT = 16                  # baseline config
+MSHR_CHOICES = (4, 8, 16, 32)      # L2 MSHR ladder (the adaptive one)
+MSHR_DEFAULT = 16                  # baseline L2 config
 MSHR_DRAIN_STALL = 200             # cycles to drain and resize MSHRs
+
+# L1 MSHRs are fixed. They must be at least as large as the biggest L2 choice,
+# otherwise L1 would be the binding limit and the L2 MSHR count would have no
+# effect.
+L1_MSHR = 64
 
 # ---------------------------------------------------------------------------
 # 5. Prefetch
@@ -83,6 +88,10 @@ PF_ACC_LOW = 0.40                  # "prefetch is inaccurate" threshold
 PF_ACC_OFF = 0.30                  # "turn off" threshold
 PF_COV_LOW = 0.30                  # "coverage too low" threshold
 PF_COV_OFF = 0.10                  # "turn off" coverage threshold
+
+# Prefetches may not take the last PF_MSHR_RESERVE MSHRs, so they can never
+# starve demand misses.
+PF_MSHR_RESERVE = 1
 
 # Expected hit rates used by the live estimator (config constants, not
 # measured from the test workload).
@@ -177,3 +186,57 @@ BASELINE_CONFIG = {
     "pf_distance": PF_DISTANCE_DEFAULT[PF_MODE_DEFAULT],
     "n_mshr": MSHR_DEFAULT,
 }
+
+# ---------------------------------------------------------------------------
+# 10. Workload
+# ---------------------------------------------------------------------------
+
+# Conflict phase: CONFLICT_SETS L2 sets, each hit by CONFLICT_WAYS lines that
+# all map to the same set at every associativity. It thrashes below
+# CONFLICT_WAYS-way and fits at or above it. It must sit strictly above the
+# second-largest and at most the largest associativity choice (checked below),
+# and CONFLICT_SETS * CONFLICT_WAYS must exceed the L1 line count so the L1
+# cannot absorb it.
+CONFLICT_SETS = 128
+CONFLICT_WAYS = 6
+
+# Default test workload: (kind, length in ops). One op = one instruction, so
+# an op index is also an instruction count. Lengths are chosen so each phase
+# spans roughly 20+ monitor windows under the baseline configuration
+# (check_base.py prints the measured number).
+DEFAULT_PHASES = (
+    ("compute",   800_000),
+    ("streaming",  50_000),
+    ("compute",   800_000),
+    ("pointer",     1_000),
+)
+
+# ---------------------------------------------------------------------------
+# 11. Validation
+# ---------------------------------------------------------------------------
+
+def _require(cond, msg):
+    if not cond:
+        raise ValueError(f"sim_config: {msg}")
+
+
+def validate():
+    _require(L2_ASSOC_DEFAULT in L2_ASSOC_CHOICES, "L2_ASSOC_DEFAULT not in L2_ASSOC_CHOICES")
+    _require(MSHR_DEFAULT in MSHR_CHOICES, "MSHR_DEFAULT not in MSHR_CHOICES")
+    _require(PF_MODE_DEFAULT in PF_MODES, "PF_MODE_DEFAULT not in PF_MODES")
+    _require(set(PF_DISTANCE_DEFAULT) == set(PF_MODES), "PF_DISTANCE_DEFAULT keys must match PF_MODES")
+    for a in L2_ASSOC_CHOICES:
+        _require(L2_SIZE % (a * LINE_SIZE) == 0, f"L2_SIZE not divisible by {a}-way x line size")
+    _require(L1_SIZE % (L1_ASSOC * LINE_SIZE) == 0, "L1_SIZE not divisible by L1_ASSOC x line size")
+    _require(L1_MSHR >= max(MSHR_CHOICES), "L1_MSHR must be >= the largest L2 MSHR choice")
+    _require(CORE_WIDTH >= 1 and ROB_SIZE >= 1, "CORE_WIDTH and ROB_SIZE must be >= 1")
+    _require(DRAM_LATENCY > 0 and DRAM_BUS_CYCLES > 0, "DRAM latency and bus cycles must be > 0")
+    ways = sorted(L2_ASSOC_CHOICES)
+    _require(ways[-2] < CONFLICT_WAYS <= ways[-1],
+             "CONFLICT_WAYS must be above the second-largest and at most the largest L2 associativity")
+    _require(CONFLICT_SETS * CONFLICT_WAYS > L1_SIZE // LINE_SIZE,
+             "conflict footprint must exceed the L1 line count")
+    _require(all(length > 0 for _, length in DEFAULT_PHASES), "phase lengths must be > 0")
+
+
+validate()
