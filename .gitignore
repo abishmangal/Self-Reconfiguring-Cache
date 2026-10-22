@@ -1,5 +1,9 @@
 .cache/
 __pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
 *.log
 *.tmp
 .DS_Store
