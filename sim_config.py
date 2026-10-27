@@ -54,6 +54,8 @@ CORE_WIDTH = 4                     # max instructions issued per cycle
 ROB_SIZE = 128                     # reorder buffer entries; the core stalls when
                                    # the oldest outstanding load is this many
                                    # instructions old
+MAX_DEP_DISTANCE = 64              # an op may depend on a load at most this many
+                                   # loads back (the core keeps that much history)
 
 # ---------------------------------------------------------------------------
 # 4. MSHR ladder
@@ -61,7 +63,8 @@ ROB_SIZE = 128                     # reorder buffer entries; the core stalls whe
 
 MSHR_CHOICES = (4, 8, 16, 32)      # L2 MSHR ladder (the adaptive one)
 MSHR_DEFAULT = 16                  # baseline L2 config
-MSHR_DRAIN_STALL = 200             # cycles to drain and resize MSHRs
+MSHR_DRAIN_STALL = 200             # fixed cycles to quiesce and resize the MSHR table,
+                                   # charged ON TOP of the measured drain time
 
 # L1 MSHRs are fixed. They must be at least as large as the biggest L2 choice,
 # otherwise L1 would be the binding limit and the L2 MSHR count would have no
@@ -82,12 +85,18 @@ PF_DISTANCE_DEFAULT = {
     "stride":    2,
 }
 PF_CONFIDENCE_THRESHOLD = 0.7      # stride detector must be at least this confident
+PF_CONF_MAX = 4                    # confidence counter ceiling; confident when
+                                   # counter / PF_CONF_MAX >= PF_CONFIDENCE_THRESHOLD
+PF_MAX_STRIDE_LINES = 64           # larger |stride| (in lines) is treated as noise
 PF_DISTANCE_STALL = 10             # cycles to change mode/distance
 PF_ACC_HIGH = 0.75                 # "prefetch is accurate" threshold
 PF_ACC_LOW = 0.40                  # "prefetch is inaccurate" threshold
 PF_ACC_OFF = 0.30                  # "turn off" threshold
-PF_COV_LOW = 0.30                  # "coverage too low" threshold
 PF_COV_OFF = 0.10                  # "turn off" coverage threshold
+PF_LATE_HIGH = 0.50                # most useful prefetches arrive late -> raise distance
+PF_IRREGULAR = 0.30                # sequential score AND stride confidence below this
+                                   # -> the stream is irregular, prefetching is pointless
+PF_MIN_ISSUED = 8                  # prefetches in a window before coverage is judged
 
 # Prefetches may not take the last PF_MSHR_RESERVE MSHRs, so they can never
 # starve demand misses.
@@ -98,8 +107,6 @@ PF_MSHR_RESERVE = 1
 PF_EXPECTED_HIT_NEXTLINE = 0.5
 PF_EXPECTED_HIT_STRIDE = 0.7
 PF_COV_GAIN_PER_STEP = 0.10        # coverage improvement per distance step
-PF_POLLUTION_FACTOR = 0.3          # fraction of wrong prefetches that displace
-                                   # a useful line
 
 # ---------------------------------------------------------------------------
 # 6. Monitor
@@ -107,9 +114,13 @@ PF_POLLUTION_FACTOR = 0.3          # fraction of wrong prefetches that displace
 
 WINDOW_CYCLES = 10_000             # one feature vector per 10k cycles
 AVG_WINDOW = 20                    # running-average window for relative thresholds
-SHADOW_SAMPLE_SETS = 32            # number of L2 sets sampled for shadow tags
-SHADOW_MIN_SAMPLES = 32            # minimum valid samples before shadow estimate
-                                   # is trusted by Rule G
+SHADOW_SAMPLE_SETS = 256           # sets sampled per associativity for the shadow
+                                   # tags (random but fixed; must be <= the set
+                                   # count of the largest associativity choice)
+SHADOW_MIN_SAMPLES = 32            # minimum sampled accesses per window before a
+                                   # shadow miss-rate estimate is trusted
+STREAM_MIN_SAMPLES = 32            # minimum L2 accesses per window before the
+                                   # sequential score / stride confidence count
 RECENT_ADDR_BUFFER = 64            # ring buffer size for sequential_score
 STRIDE_TABLE_SIZE = 16             # entries in the stride detector table
 STRIDE_TABLE_WAYS = 4              # associativity of the stride table
@@ -118,14 +129,17 @@ STRIDE_TABLE_WAYS = 4              # associativity of the stride table
 # 7. Controller
 # ---------------------------------------------------------------------------
 
-# Phase classification (relative to running average)
-STALL_FRAC_COMPUTE = 0.15          # below this → compute-bound candidate
-STALL_FRAC_MEMORY = 0.35           # above this → memory-bound
-MPKI_LOW_FACTOR = 0.8              # mpki < avg * this → compute-bound
-MPKI_HIGH_FACTOR = 1.3             # mpki > avg * this → memory-bound
+# Phase classification. The regime is a property of the WORKLOAD (compute /
+# memory / latency), so it uses only fractions of time, never the bus or MSHR
+# state that the controller itself changes.
+STALL_FRAC_COMPUTE = 0.15          # below this → compute-bound
+STALL_FRAC_MEMORY = 0.35           # at or above this (and not latency-bound) → memory-bound
+DEP_STALL_LATENCY = 0.50           # dependent-load stall fraction at/above this → latency-bound
+                                   # (misses cannot overlap: MSHRs and prefetch cannot help)
 
 # Gates
-HYSTERESIS_M = 3                   # consecutive windows of same phase to confirm
+HYSTERESIS_M = 3                   # consecutive windows a condition must hold
+HYSTERESIS_M_FAST = 2              # ... for damage control (turning a useless prefetcher off)
 MIN_RESIDENCY_K = 5                # windows after a switch before next switch
 MIN_RESIDENCY_K_PF = 2             # separate, shorter residency for prefetch
                                    # distance changes
@@ -135,15 +149,26 @@ SKIP_WINDOW_AFTER_SWITCH = 1       # skip this many windows for classification
 HORIZON_H = 20                     # windows (swept once as sensitivity test)
 
 # Thresholds for specific rules
-MSHR_HIGH_FRAC = 0.80              # Rule E: MSHR occupancy above this → increase
-MSHR_LOW_FRAC = 0.30               # Rule F: MSHR occupancy below this → decrease
-BW_UTIL_HEADROOM = 0.70            # Rule E: increase only if bw_util below this
-BW_UTIL_SATURATED = 0.80           # Rule D: decrease prefetch distance if above this
-SEQ_SCORE_THRESHOLD = 0.6          # Rule B/I: sequential_score must exceed this
-STALL_FRAC_ATTENTION = 0.20        # Rule B: memory must be hurting
-STALL_FRAC_ASSOC = 0.25            # Rule G/H: associativity matters only above this
-SHADOW_IMPROVEMENT_FRAC = 0.90     # Rule G: 10% fewer estimated misses required
-SHADOW_REVERT_FRAC = 0.95          # Rule H: 5% better required to revert
+MSHR_HIGH_FRAC = 0.80              # MSHR occupancy at/above this = pool is the limit; also
+                                   # "no spare MSHRs for prefetches"
+MSHR_LOW_FRAC = 0.30               # MSHR occupancy below this = pool mostly idle (shrink candidate)
+BW_UTIL_SATURATED = 0.80           # bus this busy: more MSHRs / prefetch distance cannot help
+SEQ_SCORE_THRESHOLD = 0.6          # sequential score or stride confidence needed to enable prefetch
+STALL_FRAC_ATTENTION = 0.20        # memory must be hurting before prefetch is enabled
+STALL_FRAC_ASSOC = 0.25            # associativity matters only above this stall fraction
+SHADOW_IMPROVEMENT_FRAC = 0.90     # 10% fewer estimated misses required to change associativity
+                                   # (the same test, applied the other way, is the revert rule)
+SHADOW_NO_LOSS_FRAC = 1.02         # shrinking is "free" if the shadow shows <= 2% more misses
+
+# Utility: expected cycles saved per window * HORIZON_H must exceed the estimated
+# switch cost. The associativity estimate leaves out the refetch misses, so it is
+# multiplied by this margin (tune on the tuning workload).
+ASSOC_OVERHEAD_MARGIN = 1.5
+
+# Shrinking rules are resource-saving moves with no performance gain, so they are
+# off unless a resource objective is wanted.
+ENABLE_MSHR_SHRINK = False
+ENABLE_ASSOC_SHRINK = False
 
 # ---------------------------------------------------------------------------
 # 8. Reconfiguration overhead estimates (used by the controller)
@@ -157,10 +182,14 @@ EST_OVERHEAD_MSHR = MSHR_DRAIN_STALL
 EST_OVERHEAD_ASSOC = None          # computed at runtime: n_lines * K_ASSOC
 K_ASSOC_PER_LINE = 8               # cycles per line during associativity rebuild
 
-# The simulator's REAL overhead for associativity is also computed as
-# n_lines * K_ASSOC_PER_LINE, plus warm-up misses measured after the switch.
-# The controller uses the same formula; the estimate and the real cost differ
-# only in the warm-up component, which the controller cannot predict.
+# The simulator's REAL overhead (reconfig.py):
+#   prefetch : PF_DISTANCE_STALL
+#   n_mshr   : measured drain + MSHR_DRAIN_STALL
+#   assoc    : measured drain + max(n_lines * K_ASSOC_PER_LINE, time for the
+#              flush's writebacks to clear the bus)
+# plus, for assoc, the refetch misses after the flush, counted separately.
+# The controller's estimates above leave out the measured drain and the
+# refetch misses, which it cannot predict; the report shows that gap.
 
 # ---------------------------------------------------------------------------
 # 9. Experiment settings
@@ -229,6 +258,12 @@ def validate():
         _require(L2_SIZE % (a * LINE_SIZE) == 0, f"L2_SIZE not divisible by {a}-way x line size")
     _require(L1_SIZE % (L1_ASSOC * LINE_SIZE) == 0, "L1_SIZE not divisible by L1_ASSOC x line size")
     _require(L1_MSHR >= max(MSHR_CHOICES), "L1_MSHR must be >= the largest L2 MSHR choice")
+    _require(STRIDE_TABLE_SIZE % STRIDE_TABLE_WAYS == 0, "STRIDE_TABLE_SIZE must be a multiple of STRIDE_TABLE_WAYS")
+    _require(PF_CONF_MAX >= 1 and 0 < PF_CONFIDENCE_THRESHOLD <= 1, "bad stride confidence settings")
+    for a in L2_ASSOC_CHOICES:
+        _require(L2_SIZE // (a * LINE_SIZE) >= SHADOW_SAMPLE_SETS,
+                 f"SHADOW_SAMPLE_SETS exceeds the {a}-way set count")
+    _require(MAX_DEP_DISTANCE >= 1, "MAX_DEP_DISTANCE must be >= 1")
     _require(CORE_WIDTH >= 1 and ROB_SIZE >= 1, "CORE_WIDTH and ROB_SIZE must be >= 1")
     _require(DRAM_LATENCY > 0 and DRAM_BUS_CYCLES > 0, "DRAM latency and bus cycles must be > 0")
     ways = sorted(L2_ASSOC_CHOICES)
