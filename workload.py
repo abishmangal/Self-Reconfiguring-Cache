@@ -6,11 +6,9 @@ An op is a 4-tuple:
 where
     kind : OP_COMPUTE, OP_LOAD or OP_STORE
     addr : byte address for loads/stores, None for compute
-    dep  : 0 if independent. k >= 1 if this op's ADDRESS comes from the data
-           of the k-th most recent load (k=1: the previous load, which is what
-           True meant before; True/False still work). The core makes it wait
-           for that load. Only loads are counted, never stores or compute.
-           At most sim_config.MAX_DEP_DISTANCE.
+    dep  : True if this load's ADDRESS depends on the data of the previous
+           load (pointer chasing). The core makes it wait for that load.
+           False otherwise. Stores and compute ops always carry False.
     pc   : id of the access stream (what a real PC would identify); the
            stride prefetcher keys on it. 0 for compute ops.
 
@@ -31,10 +29,6 @@ Phase kinds:
     mixed     : partly sequential, partly random, footprint >> L2
     conflict  : many lines per L2 set; thrashes at low associativity,
                 fits at high associativity (see sim_config CONFLICT_*)
-    chase_stream : one dependent pointer-chase load, then stream_per_chase
-                independent streaming loads, repeated. The chase load depends
-                on its own previous hop, stream_per_chase + 1 loads back. A
-                latency-critical chain beside bulk traffic.
 """
 
 import itertools
@@ -47,8 +41,7 @@ OP_COMPUTE = "compute"
 OP_LOAD = "load"
 OP_STORE = "store"
 
-PHASE_KINDS = ("compute", "streaming", "strided", "pointer", "mixed", "conflict",
-               "chase_stream")
+PHASE_KINDS = ("compute", "streaming", "strided", "pointer", "mixed", "conflict")
 
 # Each phase kind lives in its own 256 MB address region, so one kind never
 # warms (or collides with) another kind's data. Repeated phases of the same
@@ -65,23 +58,14 @@ DEFAULT_PARAMS = {
     "streaming": dict(footprint_mult=8, compute_per_mem=1, store_frac=0.25, pc=0x2000),
     "strided":   dict(footprint_mult=4, stride_lines=8, compute_per_mem=1,
                       store_frac=0.0, pc=0x3000),
-    # 64x the L2: a real pointer chase wanders a heap far larger than the cache, so
-    # lines near the chase that a prefetcher fetches are practically never visited
-    "pointer":   dict(footprint_mult=64, compute_per_mem=0, pc=0x4000),
+    "pointer":   dict(footprint_mult=8, compute_per_mem=0, pc=0x4000),
     "mixed":     dict(footprint_mult=8, seq_frac=0.7, compute_per_mem=1,
                       store_frac=0.1, pc_seq=0x5000, pc_rand=0x5100),
     "conflict":  dict(sets=cfg.CONFLICT_SETS, ways=cfg.CONFLICT_WAYS,
                       compute_per_mem=1, store_frac=0.2, pc=0x6000),
-    "chase_stream": dict(stream_per_chase=16, stream_footprint_mult=8,
-                         compute_per_mem=1, store_frac=0.0,
-                         pc_chase=0x7000, pc_stream=0x7100),
 }
 
 _COMPUTE_OP = (OP_COMPUTE, None, False, 0)
-
-# Pointer-chase permutations are big (64x the L2 in lines) and read-only, so one
-# copy per (seed, size) is shared by every Workload that needs it.
-_CHAINS = {}
 
 
 class Workload:
@@ -116,7 +100,6 @@ class Workload:
         self.total_ops = pos
 
         self._validate_conflict()
-        self._validate_chase_stream()
         self._chain = None   # pointer-chase permutation, built on first use
 
     # ------------------------------------------------------------------
@@ -132,8 +115,6 @@ class Workload:
             "pointer":   p["pointer"]["footprint_mult"] * L2_LINES,
             "mixed":     p["mixed"]["footprint_mult"] * L2_LINES,
             "conflict":  p["conflict"]["sets"] * p["conflict"]["ways"],
-            "chase_stream": (p["pointer"]["footprint_mult"]
-                             + p["chase_stream"]["stream_footprint_mult"]) * L2_LINES,
         }
 
     def _validate_conflict(self):
@@ -152,12 +133,6 @@ class Workload:
         if max(top, top_s) >= (1 << REGION_SHIFT):
             raise ValueError("footprint exceeds the 256 MB per-kind address region")
 
-    def _validate_chase_stream(self):
-        c = self.params["chase_stream"]
-        if c["stream_per_chase"] < 0 or c["stream_per_chase"] + 1 > cfg.MAX_DEP_DISTANCE:
-            raise ValueError("chase_stream: stream_per_chase + 1 must be within "
-                             "MAX_DEP_DISTANCE")
-
     @property
     def conflict_stride_lines(self):
         """Line spacing that maps lines to the same set at EVERY L2 assoc."""
@@ -171,14 +146,12 @@ class Workload:
     def chain(self):
         if self._chain is None:
             n = self.footprint_lines["pointer"]
-            if (self.seed, n) not in _CHAINS:
-                rng = random.Random(f"{self.seed}:chain")
-                chain = list(range(n))
-                for i in range(n - 1, 0, -1):
-                    j = rng.randrange(i)
-                    chain[i], chain[j] = chain[j], chain[i]
-                _CHAINS[(self.seed, n)] = chain
-            self._chain = _CHAINS[(self.seed, n)]
+            rng = random.Random(f"{self.seed}:chain")
+            chain = list(range(n))
+            for i in range(n - 1, 0, -1):
+                j = rng.randrange(i)
+                chain[i], chain[j] = chain[j], chain[i]
+            self._chain = chain
         return self._chain
 
     # ------------------------------------------------------------------
@@ -251,31 +224,9 @@ class Workload:
         while True:
             # The first load's address is free; every later address comes
             # from the previous load's data, hence dep=True.
-            yield (OP_LOAD, base + cur * cfg.LINE_SIZE, 0 if first else 1, p["pc"])
+            yield (OP_LOAD, base + cur * cfg.LINE_SIZE, not first, p["pc"])
             first = False
             cur = chain[cur]
-
-    def _gen_chase_stream(self, rng, p):
-        base = REGION_BASE["chase_stream"]
-        stream_base = base + (1 << 27)        # chase and stream use separate halves
-        chain = self.chain
-        n_stream = p["stream_footprint_mult"] * L2_LINES
-        cur = rng.randrange(len(chain))
-        first = True
-        since = 0                             # LOADS emitted since the last chase load
-        i = 0
-        while True:
-            dep = 0 if first else since + 1   # stores do not count as loads
-            yield (OP_LOAD, base + cur * cfg.LINE_SIZE, dep, p["pc_chase"])
-            first = False
-            cur = chain[cur]
-            since = 0
-            for _ in range(p["stream_per_chase"]):
-                kind = OP_STORE if rng.random() < p["store_frac"] else OP_LOAD
-                yield (kind, stream_base + (i % n_stream) * cfg.LINE_SIZE, 0, p["pc_stream"])
-                i += 1
-                if kind == OP_LOAD:
-                    since += 1
 
     def _gen_mixed(self, rng, p):
         base = REGION_BASE["mixed"]

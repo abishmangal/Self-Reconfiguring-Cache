@@ -11,14 +11,8 @@ What it models
   * ROB limit: the core stalls when the oldest outstanding load is
     ROB_SIZE or more instructions older than the one being issued. Retire is
     in order, so the oldest unfinished load is what blocks.
-  * Dependent ops: `dep` is 0 (independent) or k >= 1, meaning "my address
-    comes from the data of the k-th most recent LOAD" (k=1: the previous load;
-    True counts as 1). The op cannot issue until that load's data has arrived.
-    Stores and compute ops are not loads and are not counted. This lets a
-    pointer chase run beside a stream: the chase load points back past the
-    stream loads to its own previous hop. The core remembers the last
-    MAX_DEP_DISTANCE loads; a larger k is an error, and a k reaching back
-    before the first load of the run simply finds nothing to wait for.
+  * Dependent loads (dep=True) cannot issue until the previous load's data
+    has arrived (pointer chasing).
   * Stores retire through a store buffer: the core does not wait for their
     data, but a store that finds the MSHRs full must wait to be accepted.
   * MSHR full (L1 or L2): the access is refused; the core waits until the
@@ -32,8 +26,8 @@ loads, store-to-load forwarding, port limits, a real front end.
 Stall cycles are cycles in which the core advanced time only because it was
 waiting: stall_dep, stall_rob, stall_mshr, stall_end. Cycles spent in a
 reconfiguration are counted separately (drain_cycles via drain(),
-reconfig_cycles via charge() or the on_window return value) so overhead is
-never hidden inside IPC or the memory-stall fraction.
+reconfig_cycles via the on_window return value) so overhead is never hidden
+inside IPC or the memory-stall fraction.
 
 Counters are cumulative; the monitor diffs snapshots.
 """
@@ -57,8 +51,7 @@ class Core:
         self.cycle = 0
         self.slot = 0                       # instructions issued in the current cycle
         self.rob = collections.deque()      # (seq, done_cycle) of outstanding loads, oldest first
-        # data-ready cycle of the most recent loads, newest last
-        self._load_ready = collections.deque(maxlen=cfg.MAX_DEP_DISTANCE)
+        self.last_load_ready = 0            # data-ready cycle of the previous load
         self._seq = 0                       # instruction sequence number, never reset
         self._seq_base = 0
         self.stats = {}
@@ -91,17 +84,6 @@ class Core:
             self.cycle = t
             self.slot = 0
 
-    def charge(self, cycles):
-        """Advance the clock by `cycles` of reconfiguration overhead (not a
-        memory stall). reconfig.py uses this; returns the cycles charged."""
-        if cycles < 0:
-            raise ValueError("cannot charge negative cycles")
-        if cycles:
-            self.cycle += cycles
-            self.slot = 0
-            self.stats["reconfig_cycles"] += cycles
-        return cycles
-
     def drain(self):
         """Wait for every outstanding load and every outstanding miss in the
         hierarchy, then clear the ROB. Returns the cycles spent. Used by
@@ -131,10 +113,9 @@ class Core:
         window_cycles has elapsed (a long stall can make a window longer, so
         the monitor must use elapsed cycles, not the nominal window length),
         and once more with final=True when the run ends. During the call the
-        callback may inspect or reconfigure the system (reconfig.py does its
-        own drain() and charge()) and may also return extra stall cycles (int),
-        charged to reconfig_cycles. The return value of the final call is
-        ignored.
+        callback may inspect or reconfigure the system, call core.drain(), and
+        may return extra stall cycles (int), charged to reconfig_cycles. The
+        return value of the final call is ignored.
 
         Returns the cycle count at the end of the run.
         """
@@ -146,8 +127,6 @@ class Core:
         rob_size = self.rob_size
         st = self.stats
         hit_lat = l1.latency
-        hist = self._load_ready
-        max_dep = hist.maxlen
         n_run = 0
         exhausted = True
 
@@ -166,12 +145,8 @@ class Core:
                     break
 
             if kind != OP_COMPUTE:
-                if dep:
-                    if dep > max_dep:
-                        raise ValueError(f"dependency distance {dep} exceeds "
-                                         f"MAX_DEP_DISTANCE={max_dep}")
-                    if dep <= len(hist) and hist[-dep] > self.cycle:
-                        self._stall_until(hist[-dep], "stall_dep")
+                if dep and self.last_load_ready > self.cycle:
+                    self._stall_until(self.last_load_ready, "stall_dep")
                 is_write = kind == OP_STORE
                 while True:
                     res = l1.access(addr, self.cycle, is_write, False, pc)
@@ -185,7 +160,7 @@ class Core:
                 else:
                     st["loads"] += 1
                     done = res.completion
-                    hist.append(done)
+                    self.last_load_ready = done
                     if done - self.cycle > hit_lat:
                         rob.append((seq, done))
 

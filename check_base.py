@@ -20,8 +20,8 @@ import traceback
 import sim_config as cfg
 from memory import Memory
 from system import build_system
-from workload import (OP_COMPUTE, OP_LOAD, OP_STORE, PHASE_KINDS, REGION_BASE,
-                      REGION_SHIFT, Workload, make_workload)
+from workload import (OP_COMPUTE, OP_LOAD, OP_STORE, PHASE_KINDS, REGION_SHIFT,
+                      Workload, make_workload)
 
 L1_LINES = cfg.L1_SIZE // cfg.LINE_SIZE
 L2_LINES = cfg.L2_SIZE // cfg.LINE_SIZE
@@ -201,114 +201,6 @@ def test_dependent_chain():
     dep.check_invariants()
 
 
-def test_dependency_distance_semantics():
-    LINE = cfg.LINE_SIZE
-    warm, a, c = 100 * LINE, 200 * LINE, 300 * LINE
-
-    def stall(ops):
-        s = build_system()
-        run(s, [(OP_LOAD, warm, 0, 0)])             # warm: this line now hits in L1
-        s.core.reset_counters()
-        run(s, ops)
-        return s.core.stats["stall_dep"]
-
-    # A misses (data ~216 cycles away), B hits (data 4 cycles away); C depends
-    # on one of them, or on nothing.
-    base = [(OP_LOAD, a, 0, 0), (OP_LOAD, warm, 0, 0)]
-    s0 = stall(base + [(OP_LOAD, c, 0, 0)])
-    s1 = stall(base + [(OP_LOAD, c, 1, 0)])         # depends on B (previous load)
-    s2 = stall(base + [(OP_LOAD, c, 2, 0)])         # depends on A (two loads back)
-    print(f"[dep-distance] stall: independent {s0}, on B (hit) {s1}, on A (miss) {s2}")
-    assert s0 == 0 and s1 < 10 and 150 < s2 <= 216
-
-    # a store sits between A and C: it is not a load, so distance 1 still means A
-    with_store = [(OP_LOAD, a, 0, 0), (OP_STORE, warm, 0, 0), (OP_LOAD, c, 1, 0)]
-    assert 150 < stall(with_store) <= 216, "stores are not counted in the distance"
-
-    # reaching back before the first load of the run: nothing to wait for
-    assert stall([(OP_LOAD, a, 5, 0)]) == 0
-    # True/False still work (True means distance 1)
-    assert stall(base + [(OP_LOAD, c, True, 0)]) == s1
-    # beyond the history the core keeps: an error, never a silent wrong answer
-    try:
-        run(build_system(), [(OP_LOAD, a, cfg.MAX_DEP_DISTANCE + 1, 0)])
-        raise AssertionError("a distance beyond MAX_DEP_DISTANCE must raise")
-    except ValueError:
-        pass
-
-
-def test_chase_stream_dependencies_point_at_the_previous_hop():
-    chase_pc = 0x7000
-    for store_frac in (0.0, 0.3):
-        w = Workload([("chase_stream", 4_000)],
-                     params={"chase_stream": {"stream_per_chase": 10, "store_frac": store_frac}})
-        base = REGION_BASE["chase_stream"]
-        loads, hops, prev_line = [], 0, None
-        for kind, addr, dep, pc in w.ops():
-            if kind == OP_COMPUTE:
-                assert dep == 0
-                continue
-            if pc == chase_pc:
-                line = (addr - base) // cfg.LINE_SIZE
-                if prev_line is None:
-                    assert dep == 0, "the first hop has no producer"
-                else:
-                    assert 1 <= dep <= len(loads) and loads[-dep] == chase_pc, \
-                        "a hop must name the previous hop as its producer"
-                    assert line == w.chain[prev_line], "hops follow the pointer chain"
-                    hops += 1
-                prev_line = line
-            else:
-                assert dep == 0, "stream ops are independent"
-            if kind == OP_LOAD:
-                loads.append(pc)
-        assert hops > 100
-    try:
-        Workload([("chase_stream", 100)],
-                 params={"chase_stream": {"stream_per_chase": cfg.MAX_DEP_DISTANCE}})
-        raise AssertionError("distance beyond MAX_DEP_DISTANCE must be rejected up front")
-    except ValueError:
-        pass
-
-
-def test_chase_beside_stream():
-    """A pointer chase running beside a stream. Per-hop time falls as the MSHR
-    pool grows (the stream is real work and finishes sooner), but once the bus
-    saturates at 32 MSHRs the chase's own miss latency rises: queueing behind
-    the stream."""
-    base_lat = cfg.L1_LATENCY + cfg.L2_LATENCY + cfg.DRAM_LATENCY
-    hops, per = 150, 32
-
-    def go(s_per, mshr):
-        w = Workload([("chase_stream", hops * (1 + s_per) * 2)],
-                     params={"chase_stream": {"stream_per_chase": s_per}})
-        s = build_system(l2_mshr=mshr)
-        lat, orig = [], s.l1.access
-
-        def spy(addr, now, is_write=False, is_prefetch=False, pc=0):
-            r = orig(addr, now, is_write, is_prefetch, pc)
-            if pc == 0x7000 and r.completion is not None and not r.hit:
-                lat.append(r.completion - now)
-            return r
-
-        s.l1.access = spy
-        s.core.run(w.ops())
-        s.check_invariants()
-        return s.core.cycle / hops, sum(lat) / len(lat)
-
-    alone, alone_lat = go(0, 16)
-    res = {m: go(per, m) for m in cfg.MSHR_CHOICES}
-    print(f"[chase+stream] chase alone {alone:.0f} cycles/hop; with {per} stream loads/hop: " +
-          ", ".join(f"{m} MSHR: {h:.0f}/hop (chase latency {l:.0f})" for m, (h, l) in res.items()))
-    assert abs(alone - base_lat) < 2 and abs(alone_lat - base_lat) < 2
-    hop = [res[m][0] for m in cfg.MSHR_CHOICES]
-    assert hop == sorted(hop, reverse=True) and hop[0] > 3 * hop[-1], \
-        "more MSHRs still finish the whole workload sooner"
-    for m in (4, 8, 16):
-        assert abs(res[m][1] - base_lat) < 2, "below saturation the chase is not slowed"
-    assert base_lat + 20 < res[32][1] < base_lat + 80, "saturated bus delays the chase's misses"
-
-
 def test_pending_hit_merges():
     s = build_system()
     r1 = s.l1.access(0, 0)
@@ -334,45 +226,6 @@ def test_refused_access_changes_nothing():
         assert b == a, "a refused access must not change cache or memory state"
     r2 = s.l1.access(10 * cfg.LINE_SIZE, r.retry_at)
     assert r2.completion is not None, "retry at retry_at succeeds"
-
-
-def test_remap_assoc_keeps_lines_and_charges_nothing():
-    LINE = cfg.LINE_SIZE
-    # 1) lines that all still fit: nothing is lost, nothing is charged, all still hit
-    s = build_system()
-    run(s, mem_ops(range(L2_LINES // 2), kind=OP_STORE))
-    resident, writes0, cyc0 = s.l2.resident_lines(), s.memory.stats["writes"], s.core.cycle
-    sets0 = s.l2.n_sets
-    s.l2.remap_assoc(4, s.core.cycle)
-    assert s.l2.assoc == 4 and s.l2.n_sets == 2 * sets0
-    assert s.l2.n_sets * s.l2.assoc * LINE == s.l2.size, "capacity unchanged"
-    assert s.l2.resident_lines() == resident, "every line is kept"
-    assert s.memory.stats["writes"] == writes0 and s.core.cycle == cyc0, "free: no traffic, no cycles"
-    m0 = s.l2.stats["misses"]
-    run(s, mem_ops(range(L2_LINES // 2)))
-    assert s.l2.stats["misses"] == m0, "the kept lines still hit"
-
-    # 2) six lines per set squeezed into 2 ways: the 4 oldest per set go, dirty ones are written back
-    s = build_system()
-    stride = cfg.L2_SIZE // (min(cfg.L2_ASSOC_CHOICES) * LINE)
-    lines = [r + j * stride for j in range(cfg.CONFLICT_WAYS) for r in range(cfg.CONFLICT_SETS)]
-    for i, ln in enumerate(lines):
-        s.l2.access(ln * LINE, i * 400, is_write=True)
-    s.l2.retire_all(10**7)
-    s.l2.remap_assoc(2, 10**7)
-    keep = {r + j * stride for j in (cfg.CONFLICT_WAYS - 2, cfg.CONFLICT_WAYS - 1)
-            for r in range(cfg.CONFLICT_SETS)}
-    assert s.l2.resident_lines() == keep, "the most recent lines survive"
-    assert s.memory.stats["writes"] == len(lines) - len(keep), "evicted dirty lines are written back"
-
-    # 3) a bad associativity changes nothing
-    before = s.l2.resident_lines()
-    try:
-        s.l2.remap_assoc(3, 10**7)
-        raise AssertionError("invalid associativity must raise")
-    except ValueError:
-        pass
-    assert s.l2.assoc == 2 and s.l2.resident_lines() == before
 
 
 def test_flush_and_set_assoc():
@@ -601,11 +454,9 @@ def test_default_workload_scale():
 
 
 # ----------------------------------------------------------------------
-def main(argv, namespace=None):
-    """Run every test_* function in `namespace` (default: this module)."""
-    namespace = globals() if namespace is None else namespace
+def main(argv):
     pattern = argv[argv.index("-k") + 1] if "-k" in argv else ""
-    tests = [(n, f) for n, f in sorted(namespace.items())
+    tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and pattern in n]
     failed = []
     for name, fn in tests:

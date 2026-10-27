@@ -28,21 +28,11 @@ Prefetcher hook (optional, set `cache.prefetcher`): an object with
 It is called after every accepted demand access. Prefetches use the same
 MSHRs and memory bandwidth, but may not take the last `pf_mshr_reserve` MSHRs.
 
-Observers (optional, append to `cache.observers`): objects with
-    observe(addr, pc, hit, now)
-called after every accepted demand access, read-only. The monitor's shadow
-tags use this to watch the access stream the cache sees.
-
-The PC travels with every access from the core down to the L2, so a stride
-detector at the L2 can key on it.
-
 Reconfiguration primitives (policy and overhead accounting live in
 reconfig.py):
     flush_invalidate(now) -> (n_valid, n_dirty)   write back dirty, invalidate all
     set_assoc(new_assoc)                          rebuild sets; cache must be empty
     set_n_mshr(n)                                 resize the MSHR table
-    remap_assoc(new_assoc, now)                   IDEALIZED: change associativity keeping
-                                                  every line (the oracle's free switch)
 """
 
 import heapq
@@ -58,9 +48,7 @@ COUNTERS = (
     "late_hits",                         # demand hits on a line still in flight
     "blocked",                           # refused attempts (not counted above)
     "writebacks_out", "writebacks_in",
-    "pf_issued", "pf_useful", "pf_late", "pf_unused_evicted",
-    "pf_dropped",                        # prefetch refused: no free MSHR
-    "pf_redundant",                      # prefetch skipped: line already present/in flight
+    "pf_issued", "pf_useful", "pf_late", "pf_unused_evicted", "pf_dropped",
     "miss_latency_sum",                  # sum of (completion - now) over demand misses
     "occ_integral",                      # integral of MSHR occupancy over time
     "flushes",
@@ -80,7 +68,6 @@ class Cache:
         self.downstream = downstream
         self.n_mshr = n_mshr
         self.prefetcher = prefetcher
-        self.observers = []
         self.pf_mshr_reserve = (cfg.PF_MSHR_RESERVE if pf_mshr_reserve is None
                                 else pf_mshr_reserve)
         self._lru_clock = 0
@@ -131,11 +118,6 @@ class Cache:
     def count_valid(self):
         return sum(1 for cs in self.sets for line in cs if line[V])
 
-    def resident_lines(self):
-        """Line numbers (address // line size) of every valid line."""
-        return {tag_line for si, lines in enumerate(self.sets) for line in lines
-                if line[V] for tag_line in (line[TAG] * self.n_sets + si,)}
-
     # ------------------------------------------------------------------
     # MSHRs
     # ------------------------------------------------------------------
@@ -184,12 +166,10 @@ class Cache:
                 res = self._hit(line, now, is_write, is_prefetch)
                 break
         else:
-            res = self._miss(addr, set_idx, tag, now, is_write, is_prefetch, pc)
-        if not is_prefetch and res.completion is not None:
-            if self.prefetcher is not None:
-                self._train_prefetcher(addr, pc, res.hit, now)
-            for obs in self.observers:
-                obs.observe(addr, pc, res.hit, now)
+            res = self._miss(addr, set_idx, tag, now, is_write, is_prefetch)
+        if (self.prefetcher is not None and not is_prefetch
+                and res.completion is not None):
+            self._train_prefetcher(addr, pc, res.hit, now)
         return res
 
     def _hit(self, line, now, is_write, is_prefetch):
@@ -214,14 +194,14 @@ class Cache:
         self._touch(line)
         return Result(True, completion, None)
 
-    def _miss(self, addr, set_idx, tag, now, is_write, is_prefetch, pc=0):
+    def _miss(self, addr, set_idx, tag, now, is_write, is_prefetch):
         heap = self.mshr
         if len(heap) >= self.n_mshr:
             self.stats["blocked"] += 1
             return Result(False, None, heap[0])
 
         t_down = now + self.latency          # tag check, then go downstream
-        res = self.downstream.access(addr, t_down, False, is_prefetch, pc)
+        res = self.downstream.access(addr, t_down, False, is_prefetch, 0)
         if res.completion is None:           # downstream refused: nothing changed here
             self.stats["blocked"] += 1
             return Result(False, None, res.retry_at)
@@ -250,15 +230,7 @@ class Cache:
 
     def _victim(self, lines, now):
         """Invalid line first; else LRU among lines whose data has arrived;
-        else plain LRU (a still-pending line).
-
-        Evicting a pending line only drops that line: its requester already
-        holds its completion time, so nothing is corrupted, but a later access
-        to it misses again where real hardware would have held the fill. It
-        needs every way of a set in flight at once; measured at 2-way it is
-        under 0.01% of L2 misses (random 8xL2 traffic, 32 MSHRs) and zero for
-        the conflict and streaming phases. Associativity and MSHR changes drain
-        first, so no pending line is ever lost to a reconfiguration."""
+        else plain LRU (a still-pending line, only possible in tiny sets)."""
         lru_any = lines[0]
         lru_ready = None
         for line in lines:
@@ -316,7 +288,7 @@ class Cache:
         set_idx, tag = self._decode(addr)
         for line in self.sets[set_idx]:
             if line[V] and line[TAG] == tag:
-                self.stats["pf_redundant"] += 1
+                self.stats["pf_dropped"] += 1
                 return False
         if len(self.mshr) >= max(0, self.n_mshr - self.pf_mshr_reserve):
             self.stats["pf_dropped"] += 1
@@ -348,24 +320,6 @@ class Cache:
         self.stats["writebacks_out"] += n_dirty
         self.stats["flushes"] += 1
         return n_valid, n_dirty
-
-    def remap_assoc(self, new_assoc, now):
-        """IDEALIZED, zero-cost associativity change: every valid line is kept
-        and re-placed under the new index/tag split with its recency, dirty bit,
-        prefetch flag and data-ready time. Lines that no longer fit in their new
-        set are evicted (dirty ones are written back). Nothing is flushed and no
-        cycles are charged; misses in flight are untouched. This is the static
-        oracle's free switch; real switches use flush_invalidate + set_assoc."""
-        kept = [(line[LRU], line[TAG] * self.n_sets + si, line[DIRTY], line[PF], line[READY])
-                for si, lines in enumerate(self.sets) for line in lines if line[V]]
-        kept.sort()                          # oldest first: install order rebuilds recency
-        self._build(new_assoc)               # validates before changing anything
-        for _, line_no, dirty, prefetched, ready in kept:
-            set_idx, tag = line_no % self.n_sets, line_no // self.n_sets
-            lines = self.sets[set_idx]
-            victim = self._victim(lines, now)
-            self._evict(victim, set_idx, now)
-            self._install(victim, tag, dirty, prefetched, ready)
 
     def set_assoc(self, new_assoc):
         """Rebuild the sets at a new associativity (same total capacity, so
