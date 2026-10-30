@@ -1,0 +1,250 @@
+{
+  "controller": {
+    "hysteresis_m": 2,
+    "hysteresis_m_fast": 2,
+    "residency_k": 3,
+    "residency_k_pf": 2,
+    "skip_after_switch": 1,
+    "horizon_h": 20,
+    "assoc_margin": 1.5,
+    "stall_attention": 0.2,
+    "stall_assoc": 0.25,
+    "dep_stall_latency": 0.5,
+    "mshr_high": 0.8,
+    "bw_saturated": 0.8,
+    "seq_threshold": 0.6,
+    "acc_high": 0.75,
+    "acc_low": 0.4,
+    "acc_off": 0.3,
+    "late_high": 0.5,
+    "irregular": 0.3,
+    "cov_off": 0.1,
+    "shadow_improvement": 0.9
+  },
+  "window_cycles": 10000,
+  "changed_from_default": {
+    "hysteresis_m": [
+      3,
+      2
+    ],
+    "residency_k": [
+      5,
+      3
+    ]
+  },
+  "scores": {
+    "metric": "geometric mean of dynamic/baseline cycles over the tuning suite",
+    "tuning_seed": 101,
+    "default": 0.7864156142913138,
+    "tuned": 0.7489281455023508,
+    "check_seed": 102,
+    "default_check": 0.781011037648275,
+    "tuned_check": 0.7431164904581538
+  },
+  "tuning": {
+    "suite": [
+      "tune-strided",
+      "tune-paced-strided",
+      "tune-conflict4-long",
+      "tune-conflict4-short",
+      "tune-compute",
+      "tune-pointer-pf-on",
+      "tune-alternating",
+      "tune-chase-stream8",
+      "tune-mixed",
+      "tune-sparse"
+    ],
+    "seeds": [
+      101,
+      102
+    ],
+    "epsilon": 0.001,
+    "max_regression": 0.05,
+    "passes": 2,
+    "converged": true,
+    "evaluations": 88,
+    "seconds": 142.5,
+    "grid": {
+      "window_cycles": [
+        5000,
+        10000,
+        20000
+      ],
+      "hysteresis_m": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "hysteresis_m_fast": [
+        1,
+        2,
+        3
+      ],
+      "residency_k": [
+        3,
+        5,
+        8
+      ],
+      "residency_k_pf": [
+        1,
+        2,
+        4
+      ],
+      "skip_after_switch": [
+        1,
+        2
+      ],
+      "horizon_h": [
+        5,
+        10,
+        20,
+        40
+      ],
+      "assoc_margin": [
+        1.0,
+        1.5,
+        2.0,
+        3.0
+      ],
+      "stall_attention": [
+        0.1,
+        0.2,
+        0.3
+      ],
+      "stall_assoc": [
+        0.1,
+        0.25,
+        0.4
+      ],
+      "dep_stall_latency": [
+        0.3,
+        0.5,
+        0.7
+      ],
+      "mshr_high": [
+        0.7,
+        0.8,
+        0.9
+      ],
+      "bw_saturated": [
+        0.7,
+        0.8,
+        0.9
+      ],
+      "seq_threshold": [
+        0.5,
+        0.6,
+        0.8
+      ],
+      "acc_high": [
+        0.6,
+        0.75,
+        0.9
+      ],
+      "acc_low": [
+        0.3,
+        0.4,
+        0.5
+      ],
+      "acc_off": [
+        0.2,
+        0.3,
+        0.4
+      ],
+      "late_high": [
+        0.3,
+        0.5,
+        0.7
+      ],
+      "irregular": [
+        0.2,
+        0.3,
+        0.4
+      ],
+      "cov_off": [
+        0.05,
+        0.1,
+        0.2
+      ],
+      "shadow_improvement": [
+        0.8,
+        0.9,
+        0.95
+      ]
+    }
+  },
+  "per_workload": [
+    {
+      "name": "tune-strided",
+      "default": 0.6697496933430761,
+      "tuned": 0.6606915195920311,
+      "default_check": 0.6696360363524608,
+      "tuned_check": 0.66074987926417
+    },
+    {
+      "name": "tune-paced-strided",
+      "default": 0.6682938464866784,
+      "tuned": 0.5860842842165407,
+      "default_check": 0.6689821755788772,
+      "tuned_check": 0.5866899883391637
+    },
+    {
+      "name": "tune-conflict4-long",
+      "default": 0.4599686539076863,
+      "tuned": 0.38322495973274473,
+      "default_check": 0.4604869157661763,
+      "tuned_check": 0.3832969882393786
+    },
+    {
+      "name": "tune-conflict4-short",
+      "default": 0.9236359491001325,
+      "tuned": 0.8561921997235562,
+      "default_check": 0.9306248924083319,
+      "tuned_check": 0.8599586847994491
+    },
+    {
+      "name": "tune-compute",
+      "default": 1.0,
+      "tuned": 1.0,
+      "default_check": 1.0,
+      "tuned_check": 1.0
+    },
+    {
+      "name": "tune-pointer-pf-on",
+      "default": 1.0075939124210265,
+      "tuned": 1.0075939124210265,
+      "default_check": 1.008982596219824,
+      "tuned_check": 1.008982596219824
+    },
+    {
+      "name": "tune-alternating",
+      "default": 0.8984127871376558,
+      "tuned": 0.8886969203446287,
+      "default_check": 0.8989588888042457,
+      "tuned_check": 0.8892486224321373
+    },
+    {
+      "name": "tune-chase-stream8",
+      "default": 1.0,
+      "tuned": 1.0,
+      "default_check": 1.0,
+      "tuned_check": 1.0
+    },
+    {
+      "name": "tune-mixed",
+      "default": 0.6938323293284487,
+      "tuned": 0.6863496163996124,
+      "default_check": 0.6943096668892351,
+      "tuned_check": 0.6868016915201425
+    },
+    {
+      "name": "tune-sparse",
+      "default": 0.7575237210769326,
+      "tuned": 0.7109401694425218,
+      "default_check": 0.6984730830837802,
+      "tuned_check": 0.6521867818093182
+    }
+  ],
+  "sim_config_fingerprint": "b46889c2bc1deebd9ff6810ce4f07c13ae9b0931"
+}

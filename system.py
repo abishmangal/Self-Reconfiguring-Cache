@@ -14,6 +14,7 @@ import sim_config as cfg
 from cache import Cache
 from core import Core
 from memory import Memory
+from prefetch import PrefetchUnit
 
 
 @dataclass
@@ -22,15 +23,19 @@ class System:
     l2: Cache
     l1: Cache
     core: Core
+    pf: object = None          # the L2's PrefetchUnit (or a test stand-in)
 
     def snapshot(self):
-        return {
+        d = {
             "cycle": self.core.cycle,
             "core": self.core.snapshot(),
             "l1": self.l1.snapshot(),
             "l2": self.l2.snapshot(),
             "mem": self.memory.snapshot(),
         }
+        if hasattr(self.pf, "snapshot"):
+            d["pf"] = self.pf.snapshot()
+        return d
 
     def reset_counters(self):
         """Zero all counters (e.g. after a warm-up pass). State and time are kept."""
@@ -59,14 +64,20 @@ class System:
 
 def build_system(l2_assoc=None, l2_mshr=None, l1_mshr=None,
                  dram_latency=None, bus_cycles=None,
-                 width=None, rob_size=None, l2_prefetcher=None):
+                 width=None, rob_size=None, l2_prefetcher=None,
+                 pf_mode=None, pf_distance=None):
+    """l2_prefetcher overrides the default PrefetchUnit (tests use stand-ins).
+    The default unit is always attached: its detectors keep training even when
+    the mode is "off", which is what lets the monitor see whether a stream is
+    prefetchable before the controller turns prefetching on."""
     memory = Memory(latency=dram_latency, bus_cycles=bus_cycles)
+    pf = l2_prefetcher if l2_prefetcher is not None else PrefetchUnit(pf_mode, pf_distance)
     l2 = Cache("L2", cfg.L2_SIZE,
                cfg.L2_ASSOC_DEFAULT if l2_assoc is None else l2_assoc,
                cfg.L2_LATENCY, memory,
                n_mshr=cfg.MSHR_DEFAULT if l2_mshr is None else l2_mshr,
-               prefetcher=l2_prefetcher)
+               prefetcher=pf)
     l1 = Cache("L1", cfg.L1_SIZE, cfg.L1_ASSOC, cfg.L1_LATENCY, l2,
                n_mshr=cfg.L1_MSHR if l1_mshr is None else l1_mshr)
     core = Core(l1, width=width, rob_size=rob_size)
-    return System(memory=memory, l2=l2, l1=l1, core=core)
+    return System(memory=memory, l2=l2, l1=l1, core=core, pf=pf)

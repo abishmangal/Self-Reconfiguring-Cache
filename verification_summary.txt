@@ -1,0 +1,12 @@
+=== Test suite ===
+
+=== Tuning ===
+Parameters changed: 2 of 21
+Converged: True
+Tuning seed scores: default 0.7864 -> tuned 0.7489
+Held-out seed: default 0.7810 -> tuned 0.7431
+
+=== Sensitivity (flat rows = untested parameters) ===
+Varied: 5 parameters
+Flat:   16 parameters
+  ['hysteresis_m_fast', 'horizon_h', 'assoc_margin', 'stall_attention', 'stall_assoc', 'dep_stall_latency', 'mshr_high', 'bw_saturated', 'seq_threshold', 'acc_high', 'acc_low', 'acc_off', 'late_high', 'irregular', 'cov_off', 'shadow_improvement']

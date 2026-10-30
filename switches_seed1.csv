@@ -1,0 +1,15 @@
+workload,window,cycle,knob,change,cost,estimate,refetch,rule
+test-default,22,220090,n_mshr,16 -> 32,416,200,0,mshr-raise
+test-paced-stream,4,40332,prefetch,"('off', 0) -> ('stride', 2)",10,10,0,pf-on
+test-paced-stream,7,70440,prefetch,"('stride', 2) -> ('stride', 4)",10,10,0,pf-raise
+test-paced-stream,10,100584,prefetch,"('stride', 4) -> ('stride', 8)",10,10,0,pf-raise
+test-conflict4,5,50002,assoc,4 -> 8,32984,32768,414,assoc-better
+test-conflict2,5,50002,assoc,2 -> 8,32984,32768,211,assoc-better
+test-chase-stream,2,20088,n_mshr,16 -> 32,416,200,0,mshr-raise
+test-intermediate,6,60124,prefetch,"('off', 0) -> ('stride', 2)",10,10,0,pf-on
+test-intermediate,21,210541,prefetch,"('stride', 2) -> ('stride', 4)",10,10,0,pf-raise
+test-intermediate,30,300556,n_mshr,16 -> 32,416,200,0,mshr-raise
+test-intermediate,33,330980,prefetch,"('stride', 4) -> ('stride', 2)",10,10,0,pf-lower
+test-intermediate,36,360996,prefetch,"('stride', 2) -> ('stride', 1)",10,10,0,pf-lower
+test-intermediate,39,391012,assoc,4 -> 8,33088,32768,433,assoc-better
+test-intermediate,45,484517,prefetch,"('stride', 1) -> ('off', 0)",10,10,0,pf-off

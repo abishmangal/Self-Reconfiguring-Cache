@@ -1,0 +1,7 @@
+workload,window_accuracy,windows_scored,expected_changes,detected,missed,false_changes,mean_delay,max_delay
+test-default,1.0,91.0,15,15,0,0,1.6666666666666667,2
+test-paced-stream,1.0,50.6,5,5,0,0,1.0,1
+test-conflict4,1.0,56.0,10,7,3,0,1.0,1
+test-conflict2,1.0,59.0,10,10,0,0,1.5,2
+test-chase-stream,1.0,99.0,0,0,0,0,,
+test-intermediate,1.0,100.6,15,13,2,2,1.7692307692307692,2
